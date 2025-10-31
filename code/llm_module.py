@@ -33,6 +33,15 @@ except ImportError:
     class APIConnectionError(APIError): pass
     logging.warning("🤖⚠️ openai library not installed. OpenAI/LMStudio backends will not function.")
 
+try:
+    import boto3
+    from bedrock_llm import BedrockLLM
+    BEDROCK_AVAILABLE = True
+except ImportError:
+    BEDROCK_AVAILABLE = False
+    BedrockLLM = None
+    logging.warning("🤖⚠️ boto3 or bedrock_llm not available. Bedrock backend will not function.")
+
 # Configure logging
 # Use the root logger configured by the main application if available, else basic config
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -190,7 +199,7 @@ class LLM:
     Handles client initialization, streaming generation, request cancellation,
     system prompts, and basic connection management including an optional `ollama ps` check.
     """
-    SUPPORTED_BACKENDS = ["ollama", "openai", "lmstudio"]
+    SUPPORTED_BACKENDS = ["ollama", "openai", "lmstudio", "bedrock"]
 
     def __init__(
         self,
@@ -225,6 +234,8 @@ class LLM:
              raise ImportError("requests library is required for the 'ollama' backend but not installed.")
         if self.backend in ["openai", "lmstudio"] and not OPENAI_AVAILABLE:
              raise ImportError("openai library is required for the 'openai'/'lmstudio' backends but not installed.")
+        if self.backend == "bedrock" and not BEDROCK_AVAILABLE:
+             raise ImportError("boto3 and bedrock_llm are required for the 'bedrock' backend but not installed.")
 
         self.model = model
         self.system_prompt = system_prompt
@@ -234,6 +245,7 @@ class LLM:
 
         self.client: Optional[OpenAI] = None
         self.ollama_session: Optional[Session] = None
+        self.bedrock_client: Optional[BedrockLLM] = None
         self._client_initialized: bool = False
         self._client_init_lock = Lock()
         self._active_requests: Dict[str, Dict[str, Any]] = {}
@@ -279,12 +291,14 @@ class LLM:
         if self._client_initialized:
             if self.backend in ["openai", "lmstudio"]: return self.client is not None
             if self.backend == "ollama": return self.ollama_session is not None and self._ollama_connection_ok # Check flag
+            if self.backend == "bedrock": return self.bedrock_client is not None
             return False
 
         with self._client_init_lock:
             if self._client_initialized: # Double check
                 if self.backend in ["openai", "lmstudio"]: return self.client is not None
                 if self.backend == "ollama": return self.ollama_session is not None and self._ollama_connection_ok
+                if self.backend == "bedrock": return self.bedrock_client is not None
                 return False
 
             logger.debug(f"🤖🔄 Lazy initializing/checking connection for backend: {self.backend}")
@@ -327,6 +341,26 @@ class LLM:
                             # --- End of restored logic ---
                     else:
                         logger.error("🤖💥 Ollama session object is None or URL not set during lazy init.")
+                        init_ok = False
+                elif self.backend == "bedrock":
+                    # Initialize Bedrock client
+                    try:
+                        self.bedrock_client = BedrockLLM(
+                            model_id=self.model,
+                            system_prompt=self.system_prompt,
+                            region_name=os.getenv("AWS_REGION", "us-east-1"),
+                            profile_name=os.getenv("AWS_PROFILE_NAME")
+                        )
+                        # Test the connection by attempting to initialize the underlying client
+                        bedrock_init_ok = self.bedrock_client._lazy_initialize_clients()
+                        if bedrock_init_ok:
+                            init_ok = True
+                            logger.info("🤖🔌✅ Bedrock client initialized successfully.")
+                        else:
+                            logger.error("🤖💥 Bedrock client initialization failed.")
+                            init_ok = False
+                    except Exception as e:
+                        logger.error(f"🤖💥 Error initializing Bedrock client: {e}")
                         init_ok = False
 
                 if init_ok:
@@ -711,6 +745,28 @@ class LLM:
                 stream_object_to_register = response # The requests.Response object
                 self._register_request(req_id, "ollama", stream_object_to_register)
                 yield from self._yield_ollama_chunks(response, req_id)
+
+            elif self.backend == "bedrock":
+                if not BEDROCK_AVAILABLE:
+                    raise RuntimeError("Bedrock backend not available (should have been caught by lazy_init).")
+                
+                if self.bedrock_client is None:
+                    raise RuntimeError("Bedrock client not initialized (should have been caught by lazy_init).")
+                
+                logger.info(f"🤖💬 [{req_id}] Using Bedrock model: {self.model}")
+                
+                # Use the initialized bedrock_client's generate method directly
+                bedrock_generator = self.bedrock_client.generate(
+                    text=text,
+                    history=history,
+                    use_system_prompt=use_system_prompt,
+                    request_id=req_id,
+                    **kwargs
+                )
+                
+                stream_object_to_register = bedrock_generator
+                self._register_request(req_id, "bedrock", stream_object_to_register)
+                yield from bedrock_generator
 
             else:
                 # This case should technically be caught by __init__

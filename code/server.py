@@ -30,21 +30,38 @@ from starlette.responses import HTMLResponse, Response, FileResponse
 USE_SSL = False
 TTS_START_ENGINE = "orpheus"
 TTS_START_ENGINE = "kokoro"
-TTS_START_ENGINE = "coqui"
+# TTS_START_ENGINE = "coqui"  # Disabled due to transformers compatibility issue
+TTS_START_ENGINE = "kokoro"  # Using Kokoro instead - no downloads needed
 TTS_ORPHEUS_MODEL = "Orpheus_3B-1BaseGGUF/mOrpheus_3B-1Base_Q4_K_M.gguf"
 TTS_ORPHEUS_MODEL = "orpheus-3b-0.1-ft-Q8_0-GGUF/orpheus-3b-0.1-ft-q8_0.gguf"
 
-LLM_START_PROVIDER = "ollama"
-#LLM_START_MODEL = "qwen3:30b-a3b"
-LLM_START_MODEL = "hf.co/bartowski/huihui-ai_Mistral-Small-24B-Instruct-2501-abliterated-GGUF:Q4_K_M"
-# LLM_START_PROVIDER = "lmstudio"
-# LLM_START_MODEL = "Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q3_K_L.gguf"
+# LLM Configuration from environment variables
+LLM_START_PROVIDER = os.getenv("LLM_BACKEND", "bedrock")
+LLM_START_MODEL = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-haiku-20240307-v1:0")
+
+# Override model based on backend
+if LLM_START_PROVIDER == "openai":
+    LLM_START_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+elif LLM_START_PROVIDER == "ollama":
+    LLM_START_MODEL = os.getenv("OLLAMA_MODEL", "llama3:instruct")
+elif LLM_START_PROVIDER == "lmstudio":
+    LLM_START_MODEL = os.getenv("LMSTUDIO_MODEL", "Qwen3-30B-A3B-GGUF/Qwen3-30B-A3B-Q3_K_L.gguf")
 NO_THINK = False
 DIRECT_STREAM = TTS_START_ENGINE=="orpheus"
 
 if __name__ == "__main__":
     logger.info(f"🖥️⚙️ {Colors.apply('[PARAM]').blue} Starting engine: {Colors.apply(TTS_START_ENGINE).blue}")
     logger.info(f"🖥️⚙️ {Colors.apply('[PARAM]').blue} Direct streaming: {Colors.apply('ON' if DIRECT_STREAM else 'OFF').blue}")
+    logger.info(f"🖥️⚙️ {Colors.apply('[PARAM]').blue} LLM Provider: {Colors.apply(LLM_START_PROVIDER).blue}")
+    logger.info(f"🖥️⚙️ {Colors.apply('[PARAM]').blue} LLM Model: {Colors.apply(LLM_START_MODEL).blue}")
+    
+    # Show AWS Whisper configuration
+    use_aws_whisper = os.getenv("USE_AWS_WHISPER", "false").lower() == "true"
+    if use_aws_whisper:
+        whisper_endpoint = os.getenv("AWS_WHISPER_ENDPOINT", "not set")
+        logger.info(f"🖥️⚙️ {Colors.apply('[PARAM]').blue} AWS Whisper: {Colors.apply('ENABLED').green} - Endpoint: {Colors.apply(whisper_endpoint).blue}")
+    else:
+        logger.info(f"🖥️⚙️ {Colors.apply('[PARAM]').blue} AWS Whisper: {Colors.apply('DISABLED').yellow}")
 
 # Define the maximum allowed size for the incoming audio queue
 try:
@@ -152,7 +169,7 @@ app.add_middleware(
 )
 
 # Mount static files with no cache
-app.mount("/static", NoCacheStaticFiles(directory="static"), name="static")
+app.mount("/static", NoCacheStaticFiles(directory="code/static"), name="static")
 
 @app.get("/favicon.ico")
 async def favicon():
@@ -162,7 +179,7 @@ async def favicon():
     Returns:
         A FileResponse containing the favicon.
     """
-    return FileResponse("static/favicon.ico")
+    return FileResponse("code/static/favicon.ico")
 
 @app.get("/")
 async def get_index() -> HTMLResponse:
@@ -174,7 +191,7 @@ async def get_index() -> HTMLResponse:
     Returns:
         An HTMLResponse containing the content of index.html.
     """
-    with open("static/index.html", "r", encoding="utf-8") as f:
+    with open("code/static/index.html", "r", encoding="utf-8") as f:
         html_content = f.read()
     return HTMLResponse(content=html_content)
 

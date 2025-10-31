@@ -14,11 +14,15 @@ import json
 import copy
 import time
 import re
+import os
 from typing import Optional, Callable, Any, Dict, List
 
 # --- Configuration Flags ---
 USE_TURN_DETECTION = True
 START_STT_SERVER = False # Set to True to use the client/server version of RealtimeSTT
+USE_AWS_WHISPER = os.getenv("USE_AWS_WHISPER", "false").lower() == "true"
+AWS_WHISPER_ENDPOINT = os.getenv("AWS_WHISPER_ENDPOINT", "jumpstart-dft-hf-asr-whisper-small-20251024-185556")
+AWS_PROFILE_NAME = os.getenv("AWS_PROFILE_NAME", "tszkukle_bindle")
 
 # --- Recorder Configuration (Moved here for clarity, can be externalized) ---
 # Default config if none provided to constructor
@@ -42,7 +46,7 @@ DEFAULT_RECORDER_CONFIG: Dict[str, Any] = {
     "beam_size": 3,
     "beam_size_realtime": 3,
     "no_log_file": True,
-    "wake_words": "jarvis",
+    "wake_words": "",
     "wakeword_backend": "pvporcupine",
     "allowed_latency_limit": 500,
     # Callbacks will be added dynamically in _create_recorder
@@ -56,6 +60,9 @@ if START_STT_SERVER:
     from RealtimeSTT import AudioToTextRecorderClient
 else:
     from RealtimeSTT import AudioToTextRecorder
+
+if USE_AWS_WHISPER:
+    from aws_whisper import AWSWhisperTranscriptionProcessor
 
 if USE_TURN_DETECTION:
     from turndetect import TurnDetection
@@ -763,13 +770,9 @@ class TranscriptionProcessor:
                 # Note: The client might use different callback names, adjust if needed
                 # For now, assume it might accept the same or handle internally
                 self.recorder = AudioToTextRecorderClient(**active_config)
-                # Ensure wake words are disabled if needed (can also be done via config dict)
-                self._set_recorder_param("use_wake_words", False)
             else:
                 # Instantiate the LOCAL recorder with the corrected active_config
                 self.recorder = AudioToTextRecorder(**active_config)
-                # Ensure wake words are disabled if needed (double check via param setting)
-                self._set_recorder_param("use_wake_words", False) # Uses the helper method
 
             logger.info(f"👂✅ {recorder_type} instance created successfully.")
 

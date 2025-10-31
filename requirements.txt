@@ -12,3 +12,7 @@ python-dotenv
 # llm providers
 ollama
 openai
+
+# aws integration
+boto3
+botocore

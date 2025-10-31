@@ -1,9 +1,15 @@
 import asyncio
 import logging
+import os
 from typing import Optional, Callable
 import numpy as np
 from scipy.signal import resample_poly
 from transcribe import TranscriptionProcessor
+
+# Check if AWS Whisper should be used
+USE_AWS_WHISPER = os.getenv("USE_AWS_WHISPER", "false").lower() == "true"
+if USE_AWS_WHISPER:
+    from aws_whisper import AWSWhisperTranscriptionProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +44,28 @@ class AudioInputProcessor:
             pipeline_latency: Estimated latency of the processing pipeline in seconds.
         """
         self.last_partial_text: Optional[str] = None
-        self.transcriber = TranscriptionProcessor(
-            language,
-            on_recording_start_callback=self._on_recording_start,
-            silence_active_callback=self._silence_active_callback,
-            is_orpheus=is_orpheus,
-            pipeline_latency=pipeline_latency,
-        )
+        
+        # Choose transcription processor based on configuration
+        if USE_AWS_WHISPER:
+            logger.info("🔊 Using AWS SageMaker Whisper endpoint for transcription")
+            self.transcriber = AWSWhisperTranscriptionProcessor(
+                source_language=language,
+                on_recording_start_callback=self._on_recording_start,
+                silence_active_callback=self._silence_active_callback,
+                is_orpheus=is_orpheus,
+                pipeline_latency=pipeline_latency,
+                endpoint_name=os.getenv("AWS_WHISPER_ENDPOINT", "jumpstart-dft-hf-asr-whisper-small-20251024-185556"),
+                profile_name=os.getenv("AWS_PROFILE_NAME", "tszkukle_bindle"),
+            )
+        else:
+            logger.info("👂 Using local RealtimeSTT for transcription")
+            self.transcriber = TranscriptionProcessor(
+                language,
+                on_recording_start_callback=self._on_recording_start,
+                silence_active_callback=self._silence_active_callback,
+                is_orpheus=is_orpheus,
+                pipeline_latency=pipeline_latency,
+            )
         # Flag to indicate if the transcription loop has failed fatally
         self._transcription_failed = False
         self.transcription_task = asyncio.create_task(self._run_transcription_loop())
