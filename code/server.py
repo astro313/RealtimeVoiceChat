@@ -4,6 +4,17 @@ import logging
 from logsetup import setup_logging
 setup_logging(logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # This loads the .env file
+    logger.info("🖥️📄 Environment variables loaded from .env file")
+except ImportError:
+    logger.warning("🖥️⚠️ python-dotenv not installed, .env file not loaded")
+except Exception as e:
+    logger.warning(f"🖥️⚠️ Error loading .env file: {e}")
+
 if __name__ == "__main__":
     logger.info("🖥️👋 Welcome to local real-time voice chat")
 
@@ -28,11 +39,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import HTMLResponse, Response, FileResponse
 
 USE_SSL = False
-TTS_START_ENGINE = "orpheus"
-TTS_START_ENGINE = "kokoro"
-# TTS_START_ENGINE = "coqui"  # Disabled due to transformers compatibility issue
-TTS_START_ENGINE = "kokoro"  # Using Kokoro instead - no downloads needed
-TTS_ORPHEUS_MODEL = "Orpheus_3B-1BaseGGUF/mOrpheus_3B-1Base_Q4_K_M.gguf"
+# TTS Engine Configuration
+TTS_START_ENGINE = "kokoro"  # Current: Kokoro (fast, no downloads needed)
+# TTS_START_ENGINE = "coqui"  # Alternative: Coqui (disabled due to transformers compatibility)
+# TTS_START_ENGINE = "orpheus"  # Alternative: Orpheus (high quality, slower)
+
+# Orpheus model configuration (only used if TTS_START_ENGINE = "orpheus")
 TTS_ORPHEUS_MODEL = "orpheus-3b-0.1-ft-Q8_0-GGUF/orpheus-3b-0.1-ft-q8_0.gguf"
 
 # LLM Configuration from environment variables
@@ -144,7 +156,7 @@ async def lifespan(app: FastAPI):
     app.state.Upsampler = UpsampleOverlap()
     app.state.AudioInputProcessor = AudioInputProcessor(
         LANGUAGE,
-        is_orpheus=TTS_START_ENGINE=="orpheus",
+        is_orpheus=(TTS_START_ENGINE == "orpheus"),  # Currently False since using Kokoro
         pipeline_latency=app.state.SpeechPipelineManager.full_output_pipeline_latency / 1000, # seconds
     )
     app.state.Aborting = False # Keep this? Its usage isn't clear in the provided snippet. Minimizing changes.
@@ -169,7 +181,7 @@ app.add_middleware(
 )
 
 # Mount static files with no cache
-app.mount("/static", NoCacheStaticFiles(directory="code/static"), name="static")
+app.mount("/static", NoCacheStaticFiles(directory="static"), name="static")
 
 @app.get("/favicon.ico")
 async def favicon():
@@ -179,7 +191,7 @@ async def favicon():
     Returns:
         A FileResponse containing the favicon.
     """
-    return FileResponse("code/static/favicon.ico")
+    return FileResponse("static/favicon.ico")
 
 @app.get("/")
 async def get_index() -> HTMLResponse:
@@ -191,7 +203,7 @@ async def get_index() -> HTMLResponse:
     Returns:
         An HTMLResponse containing the content of index.html.
     """
-    with open("code/static/index.html", "r", encoding="utf-8") as f:
+    with open("static/index.html", "r", encoding="utf-8") as f:
         html_content = f.read()
     return HTMLResponse(content=html_content)
 
@@ -291,7 +303,19 @@ async def process_incoming_data(ws: WebSocket, app: FastAPI, incoming_chunks: as
                 metadata["server_received_formatted"] = format_timestamp_ns(server_ns)
 
                 # The rest of the payload is raw PCM bytes
-                metadata["pcm"] = raw[8:]
+                pcm_data = raw[8:]
+                metadata["pcm"] = pcm_data
+
+                # **IMMEDIATE INTERRUPTION CHECK**: Check if audio has actual content (not silence)
+                # and if TTS is currently playing, trigger immediate interruption
+                if callbacks.tts_client_playing and len(pcm_data) > 0:
+                    # Convert PCM to numpy array to check for actual audio content
+                    import numpy as np
+                    audio_samples = np.frombuffer(pcm_data, dtype=np.int16)
+                    # Check if audio has significant amplitude (not just noise)
+                    if np.max(np.abs(audio_samples)) > 1000:  # Threshold to filter out low-level noise
+                        logger.info(f"{Colors.apply('🖥️❗ IMMEDIATE INTERRUPTION detected - Audio input while TTS playing').blue}")
+                        callbacks.trigger_immediate_interruption()
 
                 # Check queue size before putting data
                 current_qsize = incoming_chunks.qsize()
@@ -325,11 +349,33 @@ async def process_incoming_data(ws: WebSocket, app: FastAPI, incoming_chunks: as
                     app.state.SpeechPipelineManager.reset()
                 elif msg_type == "set_speed":
                     speed_value = data.get("speed", 0)
-                    speed_factor = speed_value / 100.0  # Convert 0-100 to 0.0-1.0
+                    # Expand range: 0-200, where 50 = 0.0 (fast), 100 = 0.5 (normal), 200 = 1.0 (slow)
+                    # Allow even faster speeds with negative factors (beyond original "fast")
+                    if speed_value <= 50:
+                        # 0-50 maps to -0.5 to 0.0 (even faster than original fast setting)
+                        speed_factor = (speed_value - 50) / 100.0  # 0->-0.5, 50->0.0
+                    else:
+                        # 50-200 maps to 0.0 to 1.5 (fast to very slow, extending beyond original slow)
+                        speed_factor = (speed_value - 50) / 100.0  # 50->0.0, 100->0.5, 200->1.5
+                    
+                    # Clamp to reasonable bounds to prevent extreme values
+                    speed_factor = max(-0.5, min(speed_factor, 1.5))
+                    
+                    # Update turn detection (conversation timing)
                     turn_detection = app.state.AudioInputProcessor.transcriber.turn_detection
                     if turn_detection:
                         turn_detection.update_settings(speed_factor)
-                        logger.info(f"🖥️⚙️ Updated turn detection settings to factor: {speed_factor:.2f}")
+                        logger.info(f"🖥️⚙️ Updated turn detection settings to factor: {speed_factor:.2f} (from speed value: {speed_value})")
+                    
+                    # Calculate TTS speech speed (0-200 -> 0.5x to 2.5x speed)
+                    # 0=0.5x (very slow speech), 50=1.0x (normal), 100=1.5x (fast), 150=2.0x (very fast), 200=2.5x (ultra fast)
+                    tts_speed = 0.5 + (speed_value / 100.0)  # Maps 0-200 to 0.5-2.5
+                    tts_speed = max(0.3, min(tts_speed, 3.0))  # Clamp to reasonable bounds
+                    
+                    # Update TTS speed in SpeechPipelineManager
+                    if hasattr(app.state.SpeechPipelineManager, 'audio') and app.state.SpeechPipelineManager.audio:
+                        app.state.SpeechPipelineManager.audio.set_tts_speed(tts_speed)
+                        logger.info(f"🖥️🎵 Updated TTS speech speed to: {tts_speed:.2f}x (from speed value: {speed_value})")
 
 
     except asyncio.CancelledError:
@@ -658,9 +704,11 @@ class TranscriptionCallbacks:
         Args:
             txt: The potential sentence text.
         """
-        logger.debug(f"🖥️🧠 Potential sentence: '{txt}'")
+        logger.info(f"🖥️🧠 POTENTIAL SENTENCE DETECTED: '{txt}'")
+        logger.info(f"🖥️🧠 Calling SpeechPipelineManager.prepare_generation...")
         # Access global manager state
         self.app.state.SpeechPipelineManager.prepare_generation(txt)
+        logger.info(f"🖥️🧠 prepare_generation call completed.")
 
     def on_potential_final(self, txt: str):
         """
@@ -787,6 +835,46 @@ class TranscriptionCallbacks:
                     "type": "partial_assistant_answer",
                     "content": txt
                 })
+
+    def trigger_immediate_interruption(self):
+        """
+        Triggers immediate interruption when audio input is detected while TTS is playing.
+        
+        This provides faster interruption response than waiting for the STT system's
+        recording_start callback, which can have delays. Called directly from the
+        audio processing loop when significant audio amplitude is detected.
+        """
+        if not self.tts_client_playing:
+            return  # Nothing to interrupt
+            
+        # Set interruption flags immediately
+        self.tts_to_client = False # Stop server sending TTS
+        self.user_interrupted = True # Mark connection as user interrupted
+        
+        logger.info(f"{Colors.apply('🖥️⚡ IMMEDIATE INTERRUPTION - User speaking while TTS playing').red}")
+
+        # Send final assistant answer *if* one was generated and not sent
+        logger.info(Colors.apply("🖥️✅ Sending final assistant answer (immediate interruption)").pink)
+        self.send_final_assistant_answer(forced=True)
+
+        # Reset chunk sending flag
+        self.tts_chunk_sent = False
+
+        # Send stop messages to client immediately
+        logger.info("🖥️🛑 Sending stop_tts to client (immediate).")
+        self.message_queue.put_nowait({
+            "type": "stop_tts",
+            "content": ""
+        })
+
+        logger.info(f"{Colors.apply('🖥️🛑 IMMEDIATE INTERRUPTION ABORTING GENERATION').red}")
+        self.abort_generations("immediate_interruption, user audio detected while TTS playing")
+
+        logger.info("🖥️❗ Sending tts_interruption to client (immediate).")
+        self.message_queue.put_nowait({
+            "type": "tts_interruption",
+            "content": ""
+        })
 
     def on_recording_start(self):
         """

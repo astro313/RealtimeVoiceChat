@@ -106,15 +106,15 @@ class AWSSageMakerWhisperClient:
             logger.error(f"🔊💥 Failed to initialize AWS SageMaker client: {e}")
             raise
     
-    def _encode_audio_for_whisper(self, audio_data: np.ndarray) -> str:
+    def _create_wav_bytes(self, audio_data: np.ndarray) -> bytes:
         """
-        Encode audio data as base64 WAV for Whisper endpoint.
+        Create WAV file bytes from audio data (matching your working code format).
         
         Args:
             audio_data: Audio samples as int16 numpy array
             
         Returns:
-            Base64 encoded WAV file content
+            WAV file bytes
         """
         # Create WAV file in memory
         wav_buffer = io.BytesIO()
@@ -125,41 +125,42 @@ class AWSSageMakerWhisperClient:
             wav_file.setframerate(self.sample_rate)
             wav_file.writeframes(audio_data.tobytes())
         
-        wav_data = wav_buffer.getvalue()
-        return base64.b64encode(wav_data).decode('utf-8')
+        wav_buffer.seek(0)
+        return wav_buffer.read()
     
-    async def _invoke_whisper_endpoint(self, audio_base64: str) -> Optional[str]:
+    async def _invoke_whisper_endpoint(self, audio_bytes: bytes) -> Optional[str]:
         """
         Invoke the SageMaker Whisper endpoint asynchronously.
+        Uses raw WAV bytes format that matches your working code.
         
         Args:
-            audio_base64: Base64 encoded audio data
+            audio_bytes: Raw WAV file bytes
             
         Returns:
             Transcribed text or None if failed
         """
         try:
-            payload = {
-                "audio": audio_base64,
-                "language": self.language,
-                "task": "transcribe"
-            }
-            
             # Use asyncio.to_thread for async AWS call
+            # Send raw WAV bytes directly (not JSON) - matching your working code
             response = await asyncio.to_thread(
                 self.sagemaker_runtime.invoke_endpoint,
                 EndpointName=self.endpoint_name,
-                ContentType='application/json',
-                Body=json.dumps(payload)
+                ContentType='audio/wav',  # Send as raw audio, not JSON
+                Body=audio_bytes
             )
             
             result = json.loads(response['Body'].read().decode())
             
-            if 'text' in result:
-                return result['text'].strip()
+            # Handle both string and list responses from SageMaker (matching your code)
+            text_raw = result.get('text', '')
+            if isinstance(text_raw, list):
+                # If text is a list, join the items
+                text = ' '.join(str(item) for item in text_raw).strip()
             else:
-                logger.warning(f"🔊⚠️ Unexpected response format: {result}")
-                return None
+                # If text is a string, use it directly
+                text = str(text_raw).strip()
+            
+            return text if text else None
                 
         except ClientError as e:
             logger.error(f"🔊💥 AWS SageMaker client error: {e}")
@@ -276,11 +277,11 @@ class AWSSageMakerWhisperClient:
                 except Exception as e:
                     logger.error(f"🔊💥 Error in before_final_sentence callback: {e}")
             
-            # Encode audio for Whisper
-            audio_base64 = self._encode_audio_for_whisper(audio_to_process)
+            # Create WAV bytes for endpoint (matching your working approach)
+            audio_wav_bytes = self._create_wav_bytes(audio_to_process)
             
             # Send to AWS endpoint
-            transcription = await self._invoke_whisper_endpoint(audio_base64)
+            transcription = await self._invoke_whisper_endpoint(audio_wav_bytes)
             
             if transcription:
                 logger.info(f"🔊✅ Transcription: {transcription}")
@@ -292,10 +293,15 @@ class AWSSageMakerWhisperClient:
                 if self.realtime_transcription_callback:
                     self.realtime_transcription_callback(transcription)
                 
-                # Detect potential sentence endings
+                # Always trigger potential sentence end for AWS Whisper since it gives complete transcriptions
+                # AWS Whisper typically provides complete utterances, not partial streaming like RealtimeSTT
+                logger.info(f"🔊🎯 Triggering potential sentence end for: {transcription}")
+                if self.potential_sentence_end:
+                    self.potential_sentence_end(transcription)
+                
+                # Also detect traditional sentence endings as backup
                 if transcription.rstrip().endswith(('.', '!', '?')):
-                    if self.potential_sentence_end:
-                        self.potential_sentence_end(transcription)
+                    logger.info(f"🔊📝 Punctuation-based sentence end detected: {transcription}")
                 
                 # Call final transcription callback
                 if self.full_transcription_callback:

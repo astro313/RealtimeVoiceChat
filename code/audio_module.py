@@ -216,6 +216,9 @@ class AudioProcessor:
 
         # Callbacks to be set externally if needed
         self.on_first_audio_chunk_synthesize: Optional[Callable[[], None]] = None
+        
+        # Store current TTS speed for dynamic updates
+        self.current_tts_speed: float = 1.0
 
     def on_audio_stream_stop(self) -> None:
         """
@@ -225,6 +228,37 @@ class AudioProcessor:
         """
         logger.info("👄🛑 Audio stream stopped.")
         self.finished_event.set()
+
+    def set_tts_speed(self, speed: float) -> None:
+        """
+        Sets the TTS speech speed for the current engine.
+        
+        Args:
+            speed: Speed multiplier (0.3-3.0). 1.0 = normal speed, >1.0 = faster, <1.0 = slower
+        """
+        self.current_tts_speed = max(0.3, min(speed, 3.0))  # Clamp to safe bounds
+        
+        try:
+            if self.engine_name == "coqui" and hasattr(self.engine, 'set_speed'):
+                # Coqui uses direct speed setting
+                self.engine.set_speed(self.current_tts_speed)
+                logger.info(f"👄🎵 Set Coqui TTS speed to {self.current_tts_speed:.2f}x")
+                
+            elif self.engine_name == "kokoro" and hasattr(self.engine, 'set_speed'):
+                # Kokoro uses default_speed parameter
+                self.engine.set_speed(self.current_tts_speed)
+                logger.info(f"👄🎵 Set Kokoro TTS speed to {self.current_tts_speed:.2f}x")
+                
+            elif self.engine_name == "orpheus":
+                # Orpheus doesn't have direct speed control, but we can adjust playback rate
+                # via the stream parameters during synthesis
+                logger.info(f"👄🎵 Orpheus speed set to {self.current_tts_speed:.2f}x (will apply during synthesis)")
+                
+            else:
+                logger.warning(f"👄⚠️ TTS speed control not supported for engine: {self.engine_name}")
+                
+        except Exception as e:
+            logger.error(f"👄💥 Error setting TTS speed for {self.engine_name}: {e}")
 
     def synthesize(
             self,

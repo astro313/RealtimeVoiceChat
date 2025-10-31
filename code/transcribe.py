@@ -84,7 +84,7 @@ class TranscriptionProcessor:
     """
     # --- Constants for Silence Monitor Logic ---
     # Reserve time to ensure pipeline doesn't start too early or late
-    _PIPELINE_RESERVE_TIME_MS: float = 0.02 # 20 ms
+    _PIPELINE_RESERVE_TIME_MS: float = 0.05 # 50 ms (increased from 20ms)
     # Offset from end of silence_waiting_time to start considering "hot" state
     _HOT_THRESHOLD_OFFSET_S: float = 0.35
     # Minimum duration for the "hot" condition to be meaningful
@@ -92,11 +92,11 @@ class TranscriptionProcessor:
     # Time before full silence duration when TTS synthesis might be allowed
     _TTS_ALLOWANCE_OFFSET_S: float = 0.25
     # Minimum time for potential sentence end detection relative to silence start
-    _MIN_POTENTIAL_END_DETECTION_TIME_MS: float = 0.02 # 20 ms
+    _MIN_POTENTIAL_END_DETECTION_TIME_MS: float = 0.3 # 300 ms (increased from 20ms to prevent premature triggering)
     # Maximum age for cached sentence end timestamps (ms)
-    _SENTENCE_CACHE_MAX_AGE_MS: float = 0.2
+    _SENTENCE_CACHE_MAX_AGE_MS: float = 0.5 # 500 ms (increased from 200ms)
     # Number of detections within the cache age required to trigger potential end
-    _SENTENCE_CACHE_TRIGGER_COUNT: int = 3
+    _SENTENCE_CACHE_TRIGGER_COUNT: int = 5 # increased from 3 to require more stability
 
 
     def __init__(
@@ -284,11 +284,15 @@ class TranscriptionProcessor:
 
                     # 1. Force potential sentence end detection if time has passed
                     if time_since_silence > potential_sentence_end_time:
-                        # Check if realtime_text exists before logging/detecting
+                        # Check if realtime_text exists and is substantial before logging/detecting
                         current_text = self.realtime_text if self.realtime_text else ""
-                        logger.info(f"👂🔚 {Colors.YELLOW}Potential sentence end detected (timed out){Colors.RESET}: {current_text}")
-                        # Use force_yield=True because this is triggered by timeout, not punctuation detection
-                        self.detect_potential_sentence_end(current_text, force_yield=True, force_ellipses=True) # Force ellipses if timeout occurs
+                        # Only trigger if we have meaningful text (more than just a few words)
+                        if current_text and len(current_text.strip().split()) >= 3:
+                            logger.info(f"👂🔚 {Colors.YELLOW}Potential sentence end detected (timed out){Colors.RESET}: {current_text}")
+                            # Use force_yield=True because this is triggered by timeout, not punctuation detection
+                            self.detect_potential_sentence_end(current_text, force_yield=True, force_ellipses=True) # Force ellipses if timeout occurs
+                        else:
+                            logger.debug(f"👂🔚 Skipping timeout detection for insufficient text: '{current_text}'")
 
                     # 2. Allow TTS synthesis shortly before the final silence duration elapses
                     tts_allowance_time = silence_waiting_time - self._TTS_ALLOWANCE_OFFSET_S
@@ -815,20 +819,21 @@ class TranscriptionProcessor:
         further processing. Sets the `shutdown_performed` flag.
         """
         if not self.shutdown_performed:
-            logger.info("👂🔌 Shutting down TranscriptionProcessor...")
+            recorder_type = "RealtimeSTT" if not USE_AWS_WHISPER else "AWS Whisper"
+            logger.info(f"👂🔌 Shutting down TranscriptionProcessor ({recorder_type})...")
             self.shutdown_performed = True # Set flag early to stop loops/threads
 
             if self.recorder:
-                logger.info("👂🔌 Calling recorder shutdown()...")
+                logger.info(f"👂🔌 Calling {recorder_type} recorder shutdown()...")
                 try:
                     self.recorder.shutdown()
-                    logger.info("👂🔌 Recorder shutdown() method completed.")
+                    logger.info(f"👂🔌 {recorder_type} recorder shutdown() method completed.")
                 except Exception as e:
-                    logger.error(f"👂💥 Error during recorder shutdown: {e}", exc_info=True)
+                    logger.error(f"👂💥 Error during {recorder_type} recorder shutdown: {e}", exc_info=True)
                 finally:
                     self.recorder = None
             else:
-                logger.info("👂🔌 No active recorder instance to shut down.")
+                logger.info(f"👂🔌 No active {recorder_type} recorder instance to shut down.")
 
             # Clean up other resources if necessary (e.g., turn detection?)
             if USE_TURN_DETECTION and hasattr(self, 'turn_detection') and hasattr(self.turn_detection, 'shutdown'):
@@ -838,6 +843,6 @@ class TranscriptionProcessor:
                 except Exception as e:
                      logger.error(f"👂💥 Error during TurnDetection shutdown: {e}", exc_info=True)
 
-            logger.info("👂🔌 TranscriptionProcessor shutdown process finished.")
+            logger.info(f"👂🔌 TranscriptionProcessor ({recorder_type}) shutdown process finished.")
         else:
             logger.info("👂ℹ️ Shutdown already performed.")

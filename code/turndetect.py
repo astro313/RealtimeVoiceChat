@@ -256,24 +256,38 @@ class TurnDetection:
         """
         Adjusts dynamic pause parameters based on a speed factor.
 
-        Linearly interpolates between 'fast' (speed_factor=0.0) and 'very_slow'
-        (speed_factor=1.0) settings for various pause durations used in calculation.
-        Clamps speed_factor between 0.0 and 1.0.
+        Linearly interpolates between different speed settings:
+        - speed_factor = -0.5: Ultra fast (even faster than original fast)
+        - speed_factor = 0.0: Fast (original fast settings)  
+        - speed_factor = 1.0: Very slow (original slow settings)
+        - speed_factor = 1.5: Ultra slow (beyond original slow)
+        
+        Clamps speed_factor between -0.5 and 1.5.
 
         Args:
-            speed_factor: A float between 0.0 (fastest) and 1.0 (slowest) controlling
+            speed_factor: A float between -0.5 (ultra fast) and 1.5 (ultra slow) controlling
                           the interpolation between predefined settings.
         """
-        speed_factor = max(0.0, min(speed_factor, 1.0)) # Clamp factor
+        speed_factor = max(-0.5, min(speed_factor, 1.5)) # Clamp to extended range
+
+        # Ultra fast settings (speed_factor = -0.5)
+        ultra_fast = {
+            'detection_speed': 0.15,  # Much faster
+            'ellipsis_pause': 1.0,    # Much shorter
+            'punctuation_pause': 0.1, # Much shorter
+            'exclamation_pause': 0.08, # Much shorter
+            'question_pause': 0.06,   # Much shorter
+            'unknown_sentence_detection_pause': 0.4  # Much shorter
+        }
 
         # Base 'fast' settings (speed_factor = 0.0)
         fast = {
-            'detection_speed': 0.5,
-            'ellipsis_pause': 2.3,
-            'punctuation_pause': 0.39,
-            'exclamation_pause': 0.35,
-            'question_pause': 0.33,
-            'unknown_sentence_detection_pause': 1.25
+            'detection_speed': 0.25,  # Much faster than before
+            'ellipsis_pause': 1.5,    # Shorter
+            'punctuation_pause': 0.2, # Much shorter
+            'exclamation_pause': 0.15, # Much shorter
+            'question_pause': 0.12,   # Much shorter
+            'unknown_sentence_detection_pause': 0.6  # Much shorter
         }
 
         # Target 'very slow' settings (speed_factor = 1.0)
@@ -286,13 +300,45 @@ class TurnDetection:
             'unknown_sentence_detection_pause': 1.9
         }
 
-        # Linear interpolation for each parameter
-        self.detection_speed = fast['detection_speed'] + speed_factor * (very_slow['detection_speed'] - fast['detection_speed'])
-        self.ellipsis_pause = fast['ellipsis_pause'] + speed_factor * (very_slow['ellipsis_pause'] - fast['ellipsis_pause'])
-        self.punctuation_pause = fast['punctuation_pause'] + speed_factor * (very_slow['punctuation_pause'] - fast['punctuation_pause'])
-        self.exclamation_pause = fast['exclamation_pause'] + speed_factor * (very_slow['exclamation_pause'] - fast['exclamation_pause'])
-        self.question_pause = fast['question_pause'] + speed_factor * (very_slow['question_pause'] - fast['question_pause'])
-        self.unknown_sentence_detection_pause = fast['unknown_sentence_detection_pause'] + speed_factor * (very_slow['unknown_sentence_detection_pause'] - fast['unknown_sentence_detection_pause'])
+        # Ultra slow settings (speed_factor = 1.5)
+        ultra_slow = {
+            'detection_speed': 2.2,
+            'ellipsis_pause': 3.8,
+            'punctuation_pause': 1.2,
+            'exclamation_pause': 1.1,
+            'question_pause': 1.1,
+            'unknown_sentence_detection_pause': 2.5
+        }
+
+        # Multi-segment interpolation
+        if speed_factor < 0.0:
+            # Interpolate between ultra_fast (-0.5) and fast (0.0)
+            ratio = (speed_factor + 0.5) / 0.5  # Maps [-0.5, 0.0] to [0.0, 1.0]
+            self.detection_speed = ultra_fast['detection_speed'] + ratio * (fast['detection_speed'] - ultra_fast['detection_speed'])
+            self.ellipsis_pause = ultra_fast['ellipsis_pause'] + ratio * (fast['ellipsis_pause'] - ultra_fast['ellipsis_pause'])
+            self.punctuation_pause = ultra_fast['punctuation_pause'] + ratio * (fast['punctuation_pause'] - ultra_fast['punctuation_pause'])
+            self.exclamation_pause = ultra_fast['exclamation_pause'] + ratio * (fast['exclamation_pause'] - ultra_fast['exclamation_pause'])
+            self.question_pause = ultra_fast['question_pause'] + ratio * (fast['question_pause'] - ultra_fast['question_pause'])
+            self.unknown_sentence_detection_pause = ultra_fast['unknown_sentence_detection_pause'] + ratio * (fast['unknown_sentence_detection_pause'] - ultra_fast['unknown_sentence_detection_pause'])
+        elif speed_factor <= 1.0:
+            # Interpolate between fast (0.0) and very_slow (1.0)
+            ratio = speed_factor  # Maps [0.0, 1.0] to [0.0, 1.0]
+            self.detection_speed = fast['detection_speed'] + ratio * (very_slow['detection_speed'] - fast['detection_speed'])
+            self.ellipsis_pause = fast['ellipsis_pause'] + ratio * (very_slow['ellipsis_pause'] - fast['ellipsis_pause'])
+            self.punctuation_pause = fast['punctuation_pause'] + ratio * (very_slow['punctuation_pause'] - fast['punctuation_pause'])
+            self.exclamation_pause = fast['exclamation_pause'] + ratio * (very_slow['exclamation_pause'] - fast['exclamation_pause'])
+            self.question_pause = fast['question_pause'] + ratio * (very_slow['question_pause'] - fast['question_pause'])
+            self.unknown_sentence_detection_pause = fast['unknown_sentence_detection_pause'] + ratio * (very_slow['unknown_sentence_detection_pause'] - fast['unknown_sentence_detection_pause'])
+        else:
+            # Interpolate between very_slow (1.0) and ultra_slow (1.5)
+            ratio = (speed_factor - 1.0) / 0.5  # Maps [1.0, 1.5] to [0.0, 1.0]
+            self.detection_speed = very_slow['detection_speed'] + ratio * (ultra_slow['detection_speed'] - very_slow['detection_speed'])
+            self.ellipsis_pause = very_slow['ellipsis_pause'] + ratio * (ultra_slow['ellipsis_pause'] - very_slow['ellipsis_pause'])
+            self.punctuation_pause = very_slow['punctuation_pause'] + ratio * (ultra_slow['punctuation_pause'] - very_slow['punctuation_pause'])
+            self.exclamation_pause = very_slow['exclamation_pause'] + ratio * (ultra_slow['exclamation_pause'] - very_slow['exclamation_pause'])
+            self.question_pause = very_slow['question_pause'] + ratio * (ultra_slow['question_pause'] - very_slow['question_pause'])
+            self.unknown_sentence_detection_pause = very_slow['unknown_sentence_detection_pause'] + ratio * (ultra_slow['unknown_sentence_detection_pause'] - very_slow['unknown_sentence_detection_pause'])
+
         logger.info(f"🎤⚙️ Updated turn detection settings with speed_factor={speed_factor:.2f}")
 
 
